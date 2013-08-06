@@ -10,12 +10,21 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
 
 import org.springframework.util.Assert;
 
 import com.google.common.base.Preconditions;
 
+import com.enonic.cms.framework.util.GenericConcurrencyLock;
+
+import com.enonic.cms.api.plugin.userstore.RemoteGroup;
+import com.enonic.cms.api.plugin.userstore.RemotePrincipal;
+import com.enonic.cms.api.plugin.userstore.RemoteUser;
 import com.enonic.cms.api.plugin.userstore.RemoteUserStore;
+import com.enonic.cms.api.plugin.userstore.UserFieldType;
+import com.enonic.cms.api.plugin.userstore.UserFields;
+import com.enonic.cms.api.plugin.userstore.UserStoreConfig;
 import com.enonic.cms.core.security.InvalidCredentialsException;
 import com.enonic.cms.core.security.group.DeleteGroupCommand;
 import com.enonic.cms.core.security.group.GroupEntity;
@@ -36,7 +45,6 @@ import com.enonic.cms.core.security.user.UserNotFoundException;
 import com.enonic.cms.core.security.userstore.UserStoreConnectorPolicyBrokenException;
 import com.enonic.cms.core.security.userstore.UserStoreEntity;
 import com.enonic.cms.core.security.userstore.UserStoreKey;
-import com.enonic.cms.api.plugin.userstore.UserStoreConfig;
 import com.enonic.cms.core.security.userstore.connector.AbstractBaseUserStoreConnector;
 import com.enonic.cms.core.security.userstore.connector.GroupAlreadyExistsException;
 import com.enonic.cms.core.security.userstore.connector.UserAlreadyExistsException;
@@ -44,16 +52,13 @@ import com.enonic.cms.core.security.userstore.connector.UserStoreConnector;
 import com.enonic.cms.core.security.userstore.connector.config.UserStoreConnectorConfig;
 import com.enonic.cms.core.security.userstore.connector.synchronize.status.SynchronizeStatus;
 import com.enonic.cms.core.time.TimeService;
-import com.enonic.cms.api.plugin.userstore.UserFieldType;
-import com.enonic.cms.api.plugin.userstore.UserFields;
-import com.enonic.cms.api.plugin.userstore.RemoteGroup;
-import com.enonic.cms.api.plugin.userstore.RemotePrincipal;
-import com.enonic.cms.api.plugin.userstore.RemoteUser;
 
 public class RemoteUserStoreConnector
     extends AbstractBaseUserStoreConnector
     implements UserStoreConnector
 {
+    private static GenericConcurrencyLock<String> concurrencyLock = GenericConcurrencyLock.create();
+
     private RemoteUserStore remoteUserStorePlugin;
 
     private TimeService timeService;
@@ -449,21 +454,32 @@ public class RemoteUserStoreConnector
         synchronizer.synchronizeUsers( remoteUsers, memberCache );
     }
 
-    public synchronized void synchronizeUser( final String uid )
+    public void synchronizeUser( final String uid )
     {
-        final UserStoreEntity userStore = userStoreDao.findByKey( userStoreKey );
-        final boolean syncMemberships = connectorConfig.groupsStoredRemote();
+        final Lock locker = concurrencyLock.getLock( uid );
 
-        final UserSynchronizer synchronizer = new UserSynchronizer( userStore, syncMemberships );
-        synchronizer.setUserStorer( userStorerFactory.create( userStore.getKey() ) );
-        synchronizer.setGroupStorer( groupStorerFactory.create( userStore.getKey() ) );
-        synchronizer.setGroupDao( groupDao );
-        synchronizer.setUserDao( userDao );
-        synchronizer.setRemoteUserStorePlugin( remoteUserStorePlugin );
-        synchronizer.setTimeService( timeService );
-        synchronizer.setConnectorConfig( connectorConfig );
+        try
+        {
+            locker.lock();
 
-        synchronizer.synchronizeUser( uid );
+            final UserStoreEntity userStore = userStoreDao.findByKey( userStoreKey );
+            final boolean syncMemberships = connectorConfig.groupsStoredRemote();
+
+            final UserSynchronizer synchronizer = new UserSynchronizer( userStore, syncMemberships );
+            synchronizer.setUserStorer( userStorerFactory.create( userStore.getKey() ) );
+            synchronizer.setGroupStorer( groupStorerFactory.create( userStore.getKey() ) );
+            synchronizer.setGroupDao( groupDao );
+            synchronizer.setUserDao( userDao );
+            synchronizer.setRemoteUserStorePlugin( remoteUserStorePlugin );
+            synchronizer.setTimeService( timeService );
+            synchronizer.setConnectorConfig( connectorConfig );
+
+            synchronizer.synchronizeUser( uid );
+        }
+        finally
+        {
+            locker.unlock();
+        }
     }
 
     public synchronized void synchronizeGroup( final GroupEntity group, final boolean syncMemberships, final boolean syncMembers )
